@@ -21,11 +21,13 @@ import org.apache.commons.lang3.builder.HashCodeBuilder;
 import org.apache.nifi.annotation.behavior.EventDriven;
 import org.apache.nifi.annotation.behavior.InputRequirement;
 import org.apache.nifi.annotation.behavior.InputRequirement.Requirement;
+import org.apache.nifi.annotation.behavior.Restricted;
 import org.apache.nifi.annotation.behavior.SideEffectFree;
 import org.apache.nifi.annotation.behavior.SupportsBatching;
 import org.apache.nifi.annotation.behavior.TriggerSerially;
 import org.apache.nifi.annotation.behavior.TriggerWhenAnyDestinationAvailable;
 import org.apache.nifi.annotation.behavior.TriggerWhenEmpty;
+import org.apache.nifi.annotation.configuration.DefaultSchedule;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.lifecycle.OnScheduled;
 import org.apache.nifi.annotation.lifecycle.OnStopped;
@@ -55,8 +57,8 @@ import org.apache.nifi.processor.Processor;
 import org.apache.nifi.processor.Relationship;
 import org.apache.nifi.processor.SimpleProcessLogger;
 import org.apache.nifi.registry.VariableRegistry;
-import org.apache.nifi.scheduling.SchedulingStrategy;
 import org.apache.nifi.scheduling.ExecutionNode;
+import org.apache.nifi.scheduling.SchedulingStrategy;
 import org.apache.nifi.util.FormatUtils;
 import org.apache.nifi.util.NiFiProperties;
 import org.apache.nifi.util.ReflectionUtils;
@@ -152,7 +154,6 @@ public class StandardProcessorNode extends ProcessorNode implements Connectable 
                                  final VariableRegistry variableRegistry, final ComponentLog logger) {
 
         super(processor, uuid, validationContextFactory, controllerServiceProvider, componentType, componentCanonicalClass, variableRegistry, logger);
-
         this.processor = processor;
         identifier = new AtomicReference<>(uuid);
         destinations = new HashMap<>();
@@ -191,6 +192,31 @@ public class StandardProcessorNode extends ProcessorNode implements Connectable 
 
         schedulingStrategy = SchedulingStrategy.TIMER_DRIVEN;
         executionNode = ExecutionNode.ALL;
+        try {
+            if (procClass.isAnnotationPresent(DefaultSchedule.class)) {
+                DefaultSchedule dsc = procClass.getAnnotation(DefaultSchedule.class);
+                try {
+                    this.setSchedulingStrategy(dsc.strategy());
+                } catch (Throwable ex) {
+                    LOG.error(String.format("Error while setting scheduling strategy from DefaultSchedule annotation: %s", ex.getMessage()), ex);
+                }
+                try {
+                    this.setScheduldingPeriod(dsc.period());
+                } catch (Throwable ex) {
+                    this.setSchedulingStrategy(SchedulingStrategy.TIMER_DRIVEN);
+                    LOG.error(String.format("Error while setting scheduling period from DefaultSchedule annotation: %s", ex.getMessage()), ex);
+                }
+                if (!triggeredSerially) {
+                    try {
+                        setMaxConcurrentTasks(dsc.concurrentTasks());
+                    } catch (Throwable ex) {
+                        LOG.error(String.format("Error while setting max concurrent tasks from DefaultSchedule annotation: %s", ex.getMessage()), ex);
+                    }
+                }
+            }
+        } catch (Throwable ex) {
+            LOG.error(String.format("Error while setting default schedule from DefaultSchedule annotation: %s",ex.getMessage()),ex);
+        }
     }
 
     /**
@@ -209,6 +235,11 @@ public class StandardProcessorNode extends ProcessorNode implements Connectable 
     @Override
     public Resource getResource() {
         return ResourceFactory.getComponentResource(ResourceType.Processor, getIdentifier(), getName());
+    }
+
+    @Override
+    public boolean isRestricted() {
+        return getProcessor().getClass().isAnnotationPresent(Restricted.class);
     }
 
     /**
@@ -956,50 +987,54 @@ public class StandardProcessorNode extends ProcessorNode implements Connectable 
     public Collection<ValidationResult> getValidationErrors() {
         final List<ValidationResult> results = new ArrayList<>();
         try {
-            final ValidationContext validationContext = this.getValidationContextFactory()
-                .newValidationContext(getProperties(), getAnnotationData(), getProcessGroup().getIdentifier(), getIdentifier());
+            // Processors may go invalid while RUNNING, but only validating while STOPPED is a trade-off
+            // we are willing to make in order to save on validation costs that would be unnecessary most of the time.
+            if (getScheduledState() == ScheduledState.STOPPED) {
+                final ValidationContext validationContext = this.getValidationContextFactory()
+                        .newValidationContext(getProperties(), getAnnotationData(), getProcessGroup().getIdentifier(), getIdentifier());
 
-            final Collection<ValidationResult> validationResults;
-            try (final NarCloseable narCloseable = NarCloseable.withComponentNarLoader(getProcessor().getClass(), processor.getIdentifier())) {
-                validationResults = getProcessor().validate(validationContext);
-            }
+                final Collection<ValidationResult> validationResults;
+                try (final NarCloseable narCloseable = NarCloseable.withComponentNarLoader(getProcessor().getClass(), processor.getIdentifier())) {
+                    validationResults = getProcessor().validate(validationContext);
+                }
 
-            for (final ValidationResult result : validationResults) {
-                if (!result.isValid()) {
-                    results.add(result);
+                for (final ValidationResult result : validationResults) {
+                    if (!result.isValid()) {
+                        results.add(result);
+                    }
                 }
-            }
 
-            for (final Relationship relationship : getUndefinedRelationships()) {
-                if (!isAutoTerminated(relationship)) {
-                    final ValidationResult error = new ValidationResult.Builder()
-                            .explanation("Relationship '" + relationship.getName()
-                                    + "' is not connected to any component and is not auto-terminated")
-                            .subject("Relationship " + relationship.getName()).valid(false).build();
-                    results.add(error);
+                for (final Relationship relationship : getUndefinedRelationships()) {
+                    if (!isAutoTerminated(relationship)) {
+                        final ValidationResult error = new ValidationResult.Builder()
+                                .explanation("Relationship '" + relationship.getName()
+                                        + "' is not connected to any component and is not auto-terminated")
+                                .subject("Relationship " + relationship.getName()).valid(false).build();
+                        results.add(error);
+                    }
                 }
-            }
 
-            switch (getInputRequirement()) {
-            case INPUT_ALLOWED:
-                break;
-            case INPUT_FORBIDDEN: {
-                final int incomingConnCount = getIncomingNonLoopConnections().size();
-                if (incomingConnCount != 0) {
-                    results.add(new ValidationResult.Builder().explanation(
-                            "Processor does not allow upstream connections but currently has " + incomingConnCount)
-                            .subject("Upstream Connections").valid(false).build());
+                switch (getInputRequirement()) {
+                    case INPUT_ALLOWED:
+                        break;
+                    case INPUT_FORBIDDEN: {
+                        final int incomingConnCount = getIncomingNonLoopConnections().size();
+                        if (incomingConnCount != 0) {
+                            results.add(new ValidationResult.Builder().explanation(
+                                    "Processor does not allow upstream connections but currently has " + incomingConnCount)
+                                    .subject("Upstream Connections").valid(false).build());
+                        }
+                        break;
+                    }
+                    case INPUT_REQUIRED: {
+                        if (getIncomingNonLoopConnections().isEmpty()) {
+                            results.add(new ValidationResult.Builder()
+                                    .explanation("Processor requires an upstream connection but currently has none")
+                                    .subject("Upstream Connections").valid(false).build());
+                        }
+                        break;
+                    }
                 }
-                break;
-            }
-            case INPUT_REQUIRED: {
-                if (getIncomingNonLoopConnections().isEmpty()) {
-                    results.add(new ValidationResult.Builder()
-                            .explanation("Processor requires an upstream connection but currently has none")
-                            .subject("Upstream Connections").valid(false).build());
-                }
-                break;
-            }
             }
         } catch (final Throwable t) {
             results.add(new ValidationResult.Builder().explanation("Failed to run validation due to " + t.toString())
@@ -1418,7 +1453,7 @@ public class StandardProcessorNode extends ProcessorNode implements Connectable 
     }
 
     @Override
-    protected String getProcessGroupIdentifier() {
+    public String getProcessGroupIdentifier() {
         final ProcessGroup group = getProcessGroup();
         return group == null ? null : group.getIdentifier();
     }

@@ -127,6 +127,33 @@ public class TestPutElasticsearchHttp {
     }
 
     @Test
+    public void testPutElasticSearchOnTriggerEL() throws IOException {
+        runner = TestRunners.newTestRunner(new PutElasticsearchTestProcessor(false)); // no failures
+        runner.setValidateExpressionUsage(true);
+        runner.setProperty(AbstractElasticsearchHttpProcessor.ES_URL, "${es.url}");
+
+        runner.setProperty(PutElasticsearchHttp.INDEX, "doc");
+        runner.setProperty(PutElasticsearchHttp.TYPE, "status");
+        runner.setProperty(PutElasticsearchHttp.BATCH_SIZE, "1");
+        runner.setProperty(PutElasticsearchHttp.ID_ATTRIBUTE, "doc_id");
+        runner.setProperty(AbstractElasticsearchHttpProcessor.CONNECT_TIMEOUT, "${connect.timeout}");
+        runner.assertValid();
+
+        runner.setVariable("es.url", "http://127.0.0.1:9200");
+        runner.setVariable("connect.timeout", "5s");
+
+        runner.enqueue(docExample, new HashMap<String, String>() {{
+            put("doc_id", "28039652140");
+        }});
+        runner.run(1, true, true);
+
+        runner.assertAllFlowFilesTransferred(PutElasticsearchHttp.REL_SUCCESS, 1);
+        final MockFlowFile out = runner.getFlowFilesForRelationship(PutElasticsearchHttp.REL_SUCCESS).get(0);
+        assertNotNull(out);
+        out.assertAttributeEquals("doc_id", "28039652140");
+    }
+
+    @Test
     public void testPutElasticSearchOnTriggerBadIndexOp() throws IOException {
         runner = TestRunners.newTestRunner(new PutElasticsearchTestProcessor(false)); // no failures
         runner.setValidateExpressionUsage(true);
@@ -167,7 +194,7 @@ public class TestPutElasticsearchHttp {
         runner.assertNotValid();
     }
 
-    @Test(expected = AssertionError.class)
+    @Test
     public void testPutElasticSearchOnTriggerWithFailures() throws IOException {
         PutElasticsearchTestProcessor processor = new PutElasticsearchTestProcessor(true);
         processor.setStatus(100, "Should fail");
@@ -183,6 +210,15 @@ public class TestPutElasticsearchHttp {
             put("doc_id", "28039652140");
         }});
         runner.run(1, true, true);
+        runner.assertAllFlowFilesTransferred(PutElasticsearchHttp.REL_FAILURE, 1);
+        runner.clearTransferState();
+
+        processor.setStatus(500, "Should retry");
+        runner.enqueue(docExample, new HashMap<String, String>() {{
+            put("doc_id", "28039652140");
+        }});
+        runner.run(1, true, true);
+        runner.assertAllFlowFilesTransferred(PutElasticsearchHttp.REL_RETRY, 1);
     }
 
     @Test
@@ -192,13 +228,15 @@ public class TestPutElasticsearchHttp {
         runner.setProperty(AbstractElasticsearchHttpProcessor.ES_URL, "http://127.0.0.1:9200");
         runner.setProperty(PutElasticsearchHttp.INDEX, "doc");
         runner.setProperty(PutElasticsearchHttp.TYPE, "status");
-        runner.setProperty(PutElasticsearchHttp.BATCH_SIZE, "1");
+        runner.setProperty(PutElasticsearchHttp.BATCH_SIZE, "2");
         runner.setProperty(PutElasticsearchHttp.ID_ATTRIBUTE, "doc_id");
 
         runner.enqueue(docExample);
+        runner.enqueue(docExample);
         runner.run(1, true, true);
 
-        runner.assertAllFlowFilesTransferred(PutElasticsearchHttp.REL_FAILURE, 1);
+        runner.assertTransferCount(PutElasticsearchHttp.REL_FAILURE, 1);
+        runner.assertTransferCount(PutElasticsearchHttp.REL_SUCCESS, 1);
         final MockFlowFile out = runner.getFlowFilesForRelationship(PutElasticsearchHttp.REL_FAILURE).get(0);
         assertNotNull(out);
     }
@@ -299,12 +337,12 @@ public class TestPutElasticsearchHttp {
                         sb.append("{\"index\":{\"_index\":\"doc\",\"_type\":\"status\",\"_id\":\"28039652140\",\"status\":\"400\",");
                         sb.append("\"error\":{\"type\":\"mapper_parsing_exception\",\"reason\":\"failed to parse [gender]\",");
                         sb.append("\"caused_by\":{\"type\":\"json_parse_exception\",\"reason\":\"Unexpected end-of-input in VALUE_STRING\\n at ");
-                        sb.append("[Source: org.elasticsearch.common.io.stream.InputStreamStreamInput@1a2e3ac4; line: 1, column: 39]\"}}}}");
-                    } else {
-                        sb.append("{\"index\":{\"_index\":\"doc\",\"_type\":\"status\",\"_id\":\"28039652140\",\"status\":");
-                        sb.append(statusCode);
-                        sb.append(",\"_source\":{\"text\": \"This is a test document\"}}}");
+                        sb.append("[Source: org.elasticsearch.common.io.stream.InputStreamStreamInput@1a2e3ac4; line: 1, column: 39]\"}}}},");
                     }
+                    sb.append("{\"index\":{\"_index\":\"doc\",\"_type\":\"status\",\"_id\":\"28039652140\",\"status\":");
+                    sb.append(statusCode);
+                    sb.append(",\"_source\":{\"text\": \"This is a test document\"}}}");
+
                     sb.append("]}");
                     Response mockResponse = new Response.Builder()
                             .request(realRequest)

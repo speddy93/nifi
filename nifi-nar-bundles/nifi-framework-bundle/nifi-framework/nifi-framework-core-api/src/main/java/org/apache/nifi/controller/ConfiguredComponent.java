@@ -16,14 +16,21 @@
  */
 package org.apache.nifi.controller;
 
-import java.util.Collection;
-import java.util.Map;
-
-import org.apache.nifi.authorization.resource.Authorizable;
+import org.apache.nifi.authorization.AccessDeniedException;
+import org.apache.nifi.authorization.AuthorizationResult;
+import org.apache.nifi.authorization.AuthorizationResult.Result;
+import org.apache.nifi.authorization.Authorizer;
+import org.apache.nifi.authorization.RequestAction;
+import org.apache.nifi.authorization.resource.ComponentAuthorizable;
+import org.apache.nifi.authorization.resource.RestrictedComponentsAuthorizable;
+import org.apache.nifi.authorization.user.NiFiUser;
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.ValidationResult;
 
-public interface ConfiguredComponent extends Authorizable {
+import java.util.Collection;
+import java.util.Map;
+
+public interface ConfiguredComponent extends ComponentAuthorizable {
 
     public String getIdentifier();
 
@@ -58,4 +65,37 @@ public interface ConfiguredComponent extends Authorizable {
      */
     String getCanonicalClassName();
 
+    /**
+     * @return whether or not the underlying implementation is restricted
+     */
+    boolean isRestricted();
+
+    @Override
+    default AuthorizationResult checkAuthorization(Authorizer authorizer, RequestAction action, NiFiUser user, Map<String, String> resourceContext) {
+        // if this is a modification request and the reporting task is restricted ensure the user has elevated privileges. if this
+        // is not a modification request, we just want to use the normal rules
+        if (RequestAction.WRITE.equals(action) && isRestricted()) {
+            final RestrictedComponentsAuthorizable restrictedComponentsAuthorizable = new RestrictedComponentsAuthorizable();
+            final AuthorizationResult result = restrictedComponentsAuthorizable.checkAuthorization(authorizer, RequestAction.WRITE, user, resourceContext);
+            if (Result.Denied.equals(result.getResult())) {
+                return result;
+            }
+        }
+
+        // defer to the base authorization check
+        return ComponentAuthorizable.super.checkAuthorization(authorizer, action, user, resourceContext);
+    }
+
+    @Override
+    default void authorize(Authorizer authorizer, RequestAction action, NiFiUser user, Map<String, String> resourceContext) throws AccessDeniedException {
+        // if this is a modification request and the reporting task is restricted ensure the user has elevated privileges. if this
+        // is not a modification request, we just want to use the normal rules
+        if (RequestAction.WRITE.equals(action) && isRestricted()) {
+            final RestrictedComponentsAuthorizable restrictedComponentsAuthorizable = new RestrictedComponentsAuthorizable();
+            restrictedComponentsAuthorizable.authorize(authorizer, RequestAction.WRITE, user, resourceContext);
+        }
+
+        // defer to the base authorization check
+        ComponentAuthorizable.super.authorize(authorizer, action, user, resourceContext);
+    }
 }

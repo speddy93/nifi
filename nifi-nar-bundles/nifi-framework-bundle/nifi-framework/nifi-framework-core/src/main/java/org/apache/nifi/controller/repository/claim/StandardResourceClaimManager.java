@@ -29,10 +29,9 @@ import org.slf4j.LoggerFactory;
 
 public class StandardResourceClaimManager implements ResourceClaimManager {
 
-    private static final ConcurrentMap<ResourceClaim, ClaimCount> claimantCounts = new ConcurrentHashMap<>();
     private static final Logger logger = LoggerFactory.getLogger(StandardResourceClaimManager.class);
-
-    private static final BlockingQueue<ResourceClaim> destructableClaims = new LinkedBlockingQueue<>(50000);
+    private final ConcurrentMap<ResourceClaim, ClaimCount> claimantCounts = new ConcurrentHashMap<>();
+    private final BlockingQueue<ResourceClaim> destructableClaims = new LinkedBlockingQueue<>(50000);
 
     @Override
     public ResourceClaim newResourceClaim(final String container, final String section, final String id, final boolean lossTolerant, final boolean writable) {
@@ -50,7 +49,7 @@ public class StandardResourceClaimManager implements ResourceClaimManager {
         return (count == null) ? null : count.getClaim();
     }
 
-    private static AtomicInteger getCounter(final ResourceClaim claim) {
+    private AtomicInteger getCounter(final ResourceClaim claim) {
         if (claim == null) {
             return null;
         }
@@ -97,7 +96,10 @@ public class StandardResourceClaimManager implements ResourceClaimManager {
                 logger.debug("Decrementing claimant count for {} to {}", claim, newClaimantCount);
             }
 
-            if (newClaimantCount == 0) {
+            // If the claim is no longer referenced, we want to remove it. We consider the claim to be "no longer referenced"
+            // if the count is 0 and it is no longer writable (if it's writable, it may still be writable by the Content Repository,
+            // even though no existing FlowFile is referencing the claim).
+            if (newClaimantCount == 0 && !claim.isWritable()) {
                 removeClaimantCount(claim);
             }
             return newClaimantCount;
@@ -188,6 +190,12 @@ public class StandardResourceClaimManager implements ResourceClaimManager {
         }
 
         ((StandardResourceClaim) claim).freeze();
+
+        synchronized (claim) {
+            if (getClaimantCount(claim) == 0) {
+                claimantCounts.remove(claim);
+            }
+        }
     }
 
 

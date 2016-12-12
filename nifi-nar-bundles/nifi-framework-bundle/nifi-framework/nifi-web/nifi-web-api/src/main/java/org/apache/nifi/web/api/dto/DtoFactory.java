@@ -31,6 +31,7 @@ import org.apache.nifi.action.details.FlowChangeMoveDetails;
 import org.apache.nifi.action.details.FlowChangePurgeDetails;
 import org.apache.nifi.action.details.MoveDetails;
 import org.apache.nifi.action.details.PurgeDetails;
+import org.apache.nifi.annotation.behavior.Restricted;
 import org.apache.nifi.annotation.behavior.Stateful;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
@@ -42,6 +43,7 @@ import org.apache.nifi.authorization.RequestAction;
 import org.apache.nifi.authorization.Resource;
 import org.apache.nifi.authorization.User;
 import org.apache.nifi.authorization.resource.Authorizable;
+import org.apache.nifi.authorization.resource.ComponentAuthorizable;
 import org.apache.nifi.authorization.user.NiFiUserUtils;
 import org.apache.nifi.cluster.coordination.heartbeat.NodeHeartbeat;
 import org.apache.nifi.cluster.coordination.node.NodeConnectionStatus;
@@ -140,9 +142,11 @@ import org.apache.nifi.web.api.dto.status.ProcessorStatusDTO;
 import org.apache.nifi.web.api.dto.status.ProcessorStatusSnapshotDTO;
 import org.apache.nifi.web.api.dto.status.RemoteProcessGroupStatusDTO;
 import org.apache.nifi.web.api.dto.status.RemoteProcessGroupStatusSnapshotDTO;
+import org.apache.nifi.web.api.entity.AccessPolicyEntity;
 import org.apache.nifi.web.api.entity.AccessPolicySummaryEntity;
 import org.apache.nifi.web.api.entity.AllowableValueEntity;
 import org.apache.nifi.web.api.entity.BulletinEntity;
+import org.apache.nifi.web.api.entity.ComponentReferenceEntity;
 import org.apache.nifi.web.api.entity.ConnectionStatusSnapshotEntity;
 import org.apache.nifi.web.api.entity.FlowBreadcrumbEntity;
 import org.apache.nifi.web.api.entity.PortStatusSnapshotEntity;
@@ -737,15 +741,32 @@ public final class DtoFactory {
      * @param userGroup user group
      * @return dto
      */
-    public UserGroupDTO createUserGroupDto(final Group userGroup, Set<TenantEntity> users) {
+    public UserGroupDTO createUserGroupDto(final Group userGroup, Set<TenantEntity> users, final Set<AccessPolicySummaryEntity> accessPolicies) {
         if (userGroup == null) {
             return null;
         }
+
+        // convert to access policies to handle backward compatibility due to incorrect
+        // type in the UserGroupDTO
+        final Set<AccessPolicyEntity> policies = accessPolicies.stream().map(summaryEntity -> {
+            final AccessPolicyDTO policy = new AccessPolicyDTO();
+            policy.setId(summaryEntity.getId());
+
+            if (summaryEntity.getPermissions().getCanRead()) {
+                final AccessPolicySummaryDTO summary = summaryEntity.getComponent();
+                policy.setResource(summary.getResource());
+                policy.setAction(summary.getAction());
+                policy.setComponentReference(summary.getComponentReference());
+            }
+
+            return entityFactory.createAccessPolicyEntity(policy, summaryEntity.getRevision(), summaryEntity.getPermissions());
+        }).collect(Collectors.toSet());
 
         final UserGroupDTO dto = new UserGroupDTO();
         dto.setId(userGroup.getIdentifier());
         dto.setUsers(users);
         dto.setIdentity(userGroup.getName());
+        dto.setAccessPolicies(policies);
 
         return dto;
     }
@@ -1219,6 +1240,7 @@ public final class DtoFactory {
         dto.setAnnotationData(reportingTaskNode.getAnnotationData());
         dto.setComments(reportingTaskNode.getComments());
         dto.setPersistsState(reportingTaskNode.getReportingTask().getClass().isAnnotationPresent(Stateful.class));
+        dto.setRestricted(reportingTaskNode.isRestricted());
 
         final Map<String, String> defaultSchedulingPeriod = new HashMap<>();
         defaultSchedulingPeriod.put(SchedulingStrategy.TIMER_DRIVEN.name(), SchedulingStrategy.TIMER_DRIVEN.getDefaultSchedulingPeriod());
@@ -1288,6 +1310,7 @@ public final class DtoFactory {
         dto.setAnnotationData(controllerServiceNode.getAnnotationData());
         dto.setComments(controllerServiceNode.getComments());
         dto.setPersistsState(controllerServiceNode.getControllerServiceImplementation().getClass().isAnnotationPresent(Stateful.class));
+        dto.setRestricted(controllerServiceNode.isRestricted());
 
         // sort a copy of the properties
         final Map<PropertyDescriptor, String> sortedProperties = new TreeMap<>(new Comparator<PropertyDescriptor>() {
@@ -1510,7 +1533,7 @@ public final class DtoFactory {
         dto.setCommunicationsTimeout(group.getCommunicationsTimeout());
         dto.setYieldDuration(group.getYieldDuration());
         dto.setParentGroupId(group.getProcessGroup().getIdentifier());
-        dto.setTargetUri(group.getTargetUri().toString());
+        dto.setTargetUris(group.getTargetUris());
         dto.setFlowRefreshed(group.getLastRefreshTime());
         dto.setContents(contents);
         dto.setTransportProtocol(group.getTransportProtocol().name());
@@ -1584,7 +1607,20 @@ public final class DtoFactory {
         return dto;
     }
 
-    public AccessPolicySummaryDTO createAccessPolicySummaryDto(final AccessPolicy accessPolicy) {
+    public ComponentReferenceDTO createComponentReferenceDto(final Authorizable authorizable) {
+        if (authorizable == null || !(authorizable instanceof ComponentAuthorizable)) {
+            return null;
+        }
+
+        final ComponentAuthorizable componentAuthorizable = (ComponentAuthorizable) authorizable;
+        final ComponentReferenceDTO dto = new ComponentReferenceDTO();
+        dto.setId(componentAuthorizable.getIdentifier());
+        dto.setParentGroupId(componentAuthorizable.getProcessGroupIdentifier());
+        dto.setName(authorizable.getResource().getName());
+        return dto;
+    }
+
+    public AccessPolicySummaryDTO createAccessPolicySummaryDto(final AccessPolicy accessPolicy, final ComponentReferenceEntity componentReference) {
         if (accessPolicy == null) {
             return null;
         }
@@ -1593,10 +1629,13 @@ public final class DtoFactory {
         dto.setId(accessPolicy.getIdentifier());
         dto.setResource(accessPolicy.getResource());
         dto.setAction(accessPolicy.getAction().toString());
+        dto.setComponentReference(componentReference);
         return dto;
     }
 
-    public AccessPolicyDTO createAccessPolicyDto(final AccessPolicy accessPolicy, Set<TenantEntity> userGroups, Set<TenantEntity> users) {
+    public AccessPolicyDTO createAccessPolicyDto(final AccessPolicy accessPolicy, final Set<TenantEntity> userGroups,
+                                                 final Set<TenantEntity> users, final ComponentReferenceEntity componentReference) {
+
         if (accessPolicy == null) {
             return null;
         }
@@ -1607,6 +1646,7 @@ public final class DtoFactory {
         dto.setId(accessPolicy.getIdentifier());
         dto.setResource(accessPolicy.getResource());
         dto.setAction(accessPolicy.getAction().toString());
+        dto.setComponentReference(componentReference);
         return dto;
     }
 
@@ -1974,6 +2014,11 @@ public final class DtoFactory {
         return dto;
     }
 
+    private String getUsageRestriction(final Class<?> cls) {
+        final Restricted restriction = cls.getAnnotation(Restricted.class);
+        return restriction == null ? null : restriction.value();
+    }
+
     /**
      * Gets the capability description from the specified class.
      */
@@ -2013,6 +2058,7 @@ public final class DtoFactory {
             final DocumentedTypeDTO type = new DocumentedTypeDTO();
             type.setType(cls.getName());
             type.setDescription(getCapabilityDescription(cls));
+            type.setUsageRestriction(getUsageRestriction(cls));
             type.setTags(getTags(cls));
             types.add(type);
         }
@@ -2038,6 +2084,7 @@ public final class DtoFactory {
         dto.setParentGroupId(node.getProcessGroup().getIdentifier());
         dto.setInputRequirement(node.getInputRequirement().name());
         dto.setPersistsState(node.getProcessor().getClass().isAnnotationPresent(Stateful.class));
+        dto.setRestricted(node.isRestricted());
 
         dto.setType(node.getCanonicalClassName());
         dto.setName(node.getName());
@@ -2810,7 +2857,7 @@ public final class DtoFactory {
         copy.setActiveRemoteOutputPortCount(original.getActiveRemoteOutputPortCount());
         copy.setInactiveRemoteOutputPortCount(original.getInactiveRemoteOutputPortCount());
         copy.setParentGroupId(original.getParentGroupId());
-        copy.setTargetUri(original.getTargetUri());
+        copy.setTargetUris(original.getTargetUris());
         copy.setTransportProtocol(original.getTransportProtocol());
         copy.setProxyHost(original.getProxyHost());
         copy.setProxyPort(original.getProxyPort());

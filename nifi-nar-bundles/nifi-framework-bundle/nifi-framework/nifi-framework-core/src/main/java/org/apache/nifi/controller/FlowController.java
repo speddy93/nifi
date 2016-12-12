@@ -21,6 +21,7 @@ import org.apache.commons.collections4.Predicate;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.nifi.action.Action;
 import org.apache.nifi.admin.service.AuditService;
+import org.apache.nifi.annotation.configuration.DefaultSettings;
 import org.apache.nifi.annotation.lifecycle.OnAdded;
 import org.apache.nifi.annotation.lifecycle.OnConfigurationRestored;
 import org.apache.nifi.annotation.lifecycle.OnRemoved;
@@ -483,7 +484,6 @@ public class FlowController implements EventAccess, ControllerServiceProvider, R
         // PRIMARY_NODE_ONLY is deprecated, but still exists to handle processors that are still defined with it (they haven't been re-configured with executeNode = PRIMARY).
         processScheduler.setSchedulingAgent(SchedulingStrategy.PRIMARY_NODE_ONLY, timerDrivenAgent);
         processScheduler.setSchedulingAgent(SchedulingStrategy.CRON_DRIVEN, quartzSchedulingAgent);
-        processScheduler.scheduleFrameworkTask(new ExpireFlowFiles(this, contextFactory), "Expire FlowFiles", 30L, 30L, TimeUnit.SECONDS);
 
         startConnectablesAfterInitialization = new ArrayList<>();
         startRemoteGroupPortsAfterInitialization = new ArrayList<>();
@@ -697,6 +697,11 @@ public class FlowController implements EventAccess, ControllerServiceProvider, R
             }
 
             flowFileRepository.loadFlowFiles(this, maxIdFromSwapFiles + 1);
+
+            // Begin expiring FlowFiles that are old
+            final ProcessContextFactory contextFactory = new ProcessContextFactory(contentRepository, flowFileRepository,
+                flowFileEventRepository, counterRepositoryRef.get(), provenanceRepository);
+            processScheduler.scheduleFrameworkTask(new ExpireFlowFiles(this, contextFactory), "Expire FlowFiles", 30L, 30L, TimeUnit.SECONDS);
 
             // now that we've loaded the FlowFiles, this has restored our ContentClaims' states, so we can tell the
             // ContentRepository to purge superfluous files
@@ -1060,6 +1065,32 @@ public class FlowController implements EventAccess, ControllerServiceProvider, R
         final LogRepository logRepository = LogRepositoryFactory.getRepository(id);
         logRepository.addObserver(StandardProcessorNode.BULLETIN_OBSERVER_ID, LogLevel.WARN, new ProcessorLogObserver(getBulletinRepository(), procNode));
 
+        try {
+            final Class<?> procClass = processor.getClass();
+            if(procClass.isAnnotationPresent(DefaultSettings.class)) {
+                DefaultSettings ds = procClass.getAnnotation(DefaultSettings.class);
+                try {
+                    procNode.setYieldPeriod(ds.yieldDuration());
+                } catch(Throwable ex) {
+                    LOG.error(String.format("Error while setting yield period from DefaultSettings annotation:%s",ex.getMessage()),ex);
+                }
+                try {
+
+                    procNode.setPenalizationPeriod(ds.penaltyDuration());
+                } catch(Throwable ex) {
+                    LOG.error(String.format("Error while setting penalty duration from DefaultSettings annotation:%s",ex.getMessage()),ex);
+                }
+                try {
+                    procNode.setBulletinLevel(ds.bulletinLevel());
+                } catch (Throwable ex) {
+                    LOG.error(String.format("Error while setting bulletin level from DefaultSettings annotation:%s",ex.getMessage()),ex);
+                }
+
+            }
+        } catch (Throwable ex) {
+            LOG.error(String.format("Error while setting default settings from DefaultSettings annotation: %s",ex.getMessage()),ex);
+        }
+
         if (firstTimeAdded) {
             try (final NarCloseable x = NarCloseable.withComponentNarLoader(processor.getClass(), processor.getIdentifier())) {
                 ReflectionUtils.invokeMethodsWithAnnotation(OnAdded.class, processor);
@@ -1195,13 +1226,13 @@ public class FlowController implements EventAccess, ControllerServiceProvider, R
      * given URI
      *
      * @param id group id
-     * @param uri group uri
+     * @param uris group uris, multiple url can be specified in comma-separated format
      * @return new group
      * @throws NullPointerException if either argument is null
      * @throws IllegalArgumentException if <code>uri</code> is not a valid URI.
      */
-    public RemoteProcessGroup createRemoteProcessGroup(final String id, final String uri) {
-        return new StandardRemoteProcessGroup(requireNonNull(id).intern(), requireNonNull(uri).intern(), null, this, sslContext, nifiProperties);
+    public RemoteProcessGroup createRemoteProcessGroup(final String id, final String uris) {
+        return new StandardRemoteProcessGroup(requireNonNull(id).intern(), uris, null, this, sslContext, nifiProperties);
     }
 
     public ProcessGroup getRootGroup() {
@@ -1738,7 +1769,7 @@ public class FlowController implements EventAccess, ControllerServiceProvider, R
             // Instantiate Remote Process Groups
             //
             for (final RemoteProcessGroupDTO remoteGroupDTO : dto.getRemoteProcessGroups()) {
-                final RemoteProcessGroup remoteGroup = createRemoteProcessGroup(remoteGroupDTO.getId(), remoteGroupDTO.getTargetUri());
+                final RemoteProcessGroup remoteGroup = createRemoteProcessGroup(remoteGroupDTO.getId(), remoteGroupDTO.getTargetUris());
                 remoteGroup.setComments(remoteGroupDTO.getComments());
                 remoteGroup.setPosition(toPosition(remoteGroupDTO.getPosition()));
                 remoteGroup.setCommunicationsTimeout(remoteGroupDTO.getCommunicationsTimeout());
@@ -2577,7 +2608,7 @@ public class FlowController implements EventAccess, ControllerServiceProvider, R
         final RemoteProcessGroupStatus status = new RemoteProcessGroupStatus();
         status.setGroupId(remoteGroup.getProcessGroup().getIdentifier());
         status.setName(isRemoteProcessGroupAuthorized ? remoteGroup.getName() : remoteGroup.getIdentifier());
-        status.setTargetUri(isRemoteProcessGroupAuthorized ? remoteGroup.getTargetUri().toString() : null);
+        status.setTargetUri(isRemoteProcessGroupAuthorized ? remoteGroup.getTargetUri() : null);
 
         long lineageMillis = 0L;
         int flowFilesRemoved = 0;
@@ -2695,16 +2726,16 @@ public class FlowController implements EventAccess, ControllerServiceProvider, R
             status.setFlowFilesRemoved(entry.getFlowFilesRemoved());
         }
 
-        // determine the run status and get any validation errors... must check
-        // is valid when not disabled since a processors validity could change due
-        // to environmental conditions (property configured with a file path and
-        // the file being externally removed)
+        // Determine the run status and get any validation error... only validating while STOPPED
+        // is a trade-off we are willing to make, even though processor validity could change due to
+        // environmental conditions (property configured with a file path and the file being externally
+        // removed). This saves on validation costs that would be unnecessary most of the time.
         if (ScheduledState.DISABLED.equals(procNode.getScheduledState())) {
             status.setRunStatus(RunStatus.Disabled);
-        } else if (!procNode.isValid()) {
-            status.setRunStatus(RunStatus.Invalid);
         } else if (ScheduledState.RUNNING.equals(procNode.getScheduledState())) {
             status.setRunStatus(RunStatus.Running);
+        } else if (!procNode.isValid()) {
+            status.setRunStatus(RunStatus.Invalid);
         } else {
             status.setRunStatus(RunStatus.Stopped);
         }
@@ -3350,6 +3381,13 @@ public class FlowController implements EventAccess, ControllerServiceProvider, R
             @Override
             public synchronized void onLeaderElection() {
                 LOG.info("This node elected Active Cluster Coordinator");
+
+                // Purge any heartbeats that we already have. If we don't do this, we can have a scenario where we receive heartbeats
+                // from a node, and then another node becomes Cluster Coordinator. As a result, we stop receiving heartbeats. Now that
+                // we are again the Cluster Coordinator, we will detect that there are old heartbeat messages and start disconnecting
+                // nodes due to a lack of heartbeat. By purging the heartbeats here, we remove any old heartbeat messages so that this
+                // does not happen.
+                FlowController.this.heartbeatMonitor.purgeHeartbeats();
             }
         }, participantId);
     }
@@ -3761,9 +3799,20 @@ public class FlowController implements EventAccess, ControllerServiceProvider, R
             throw new IllegalStateException("Cannot replay data from Provenance Event because the Source FlowFile Queue with ID " + event.getSourceQueueIdentifier() + " no longer exists");
         }
 
-        // Create the ContentClaim
-        final ResourceClaim resourceClaim = resourceClaimManager.newResourceClaim(event.getPreviousContentClaimContainer(),
-            event.getPreviousContentClaimSection(), event.getPreviousContentClaimIdentifier(), false, false);
+        // Create the ContentClaim. To do so, we first need the appropriate Resource Claim. Because we don't know whether or
+        // not the Resource Claim is still active, we first call ResourceClaimManager.getResourceClaim. If this returns
+        // null, then we know that the Resource Claim is no longer active and can just create a new one that is not writable.
+        // It's critical though that we first call getResourceClaim because otherwise, if the Resource Claim is active and we
+        // create a new one that is not writable, we could end up archiving or destroying the Resource Claim while it's still
+        // being written to by the Content Repository. This is important only because we are creating a FlowFile with this Resource
+        // Claim. If, for instance, we are simply creating the claim to request its content, as in #getContentAvailability, etc.
+        // then this is not necessary.
+        ResourceClaim resourceClaim = resourceClaimManager.getResourceClaim(event.getPreviousContentClaimContainer(),
+            event.getPreviousContentClaimSection(), event.getPreviousContentClaimIdentifier());
+        if (resourceClaim == null) {
+            resourceClaim = resourceClaimManager.newResourceClaim(event.getPreviousContentClaimContainer(),
+                event.getPreviousContentClaimSection(), event.getPreviousContentClaimIdentifier(), false, false);
+        }
 
         // Increment Claimant Count, since we will now be referencing the Content Claim
         resourceClaimManager.incrementClaimantCount(resourceClaim);
@@ -3825,7 +3874,8 @@ public class FlowController implements EventAccess, ControllerServiceProvider, R
         provenanceRepository.registerEvent(replayEvent);
 
         // Update the FlowFile Repository to indicate that we have added the FlowFile to the flow
-        final StandardRepositoryRecord record = new StandardRepositoryRecord(queue, flowFileRecord);
+        final StandardRepositoryRecord record = new StandardRepositoryRecord(queue);
+        record.setWorking(flowFileRecord);
         record.setDestination(queue);
         flowFileRepository.updateRepository(Collections.<RepositoryRecord>singleton(record));
 
@@ -3960,23 +4010,47 @@ public class FlowController implements EventAccess, ControllerServiceProvider, R
     }
 
     @Override
-    public Authorizable createDataAuthorizable(final String componentId) {
+    public Authorizable createLocalDataAuthorizable(final String componentId) {
         final String rootGroupId = getRootGroupId();
 
         // Provenance Events are generated only by connectable components, with the exception of DOWNLOAD events,
-        // which have the root process group's identifier assigned as the component ID. So, we check if the component ID
-        // is set to the root group and otherwise assume that the ID is that of a component.
+        // which have the root process group's identifier assigned as the component ID, and DROP events, which
+        // could have the connection identifier assigned as the component ID. So, we check if the component ID
+        // is set to the root group and otherwise assume that the ID is that of a connectable or connection.
         final DataAuthorizable authorizable;
         if (rootGroupId.equals(componentId)) {
             authorizable = new DataAuthorizable(getRootGroup());
         } else {
-            final Connectable connectable = getRootGroup().findConnectable(componentId);
-
+            // check if the component is a connectable, this should be the case most often
+            final Connectable connectable = getRootGroup().findLocalConnectable(componentId);
             if (connectable == null) {
-                throw new ResourceNotFoundException("The component that generated this event is no longer part of the data flow.");
-            }
+                // if the component id is not a connectable then consider a connection
+                final Connection connection = getRootGroup().findConnection(componentId);
 
-            authorizable = new DataAuthorizable(connectable);
+                if (connection == null) {
+                    throw new ResourceNotFoundException("The component that generated this event is no longer part of the data flow.");
+                } else {
+                    // authorizable for connection data is associated with the source connectable
+                    authorizable = new DataAuthorizable(connection.getSource());
+                }
+            } else {
+                authorizable = new DataAuthorizable(connectable);
+            }
+        }
+
+        return authorizable;
+    }
+
+    @Override
+    public Authorizable createRemoteDataAuthorizable(String remoteGroupPortId) {
+        final DataAuthorizable authorizable;
+
+        final RemoteGroupPort remoteGroupPort = getRootGroup().findRemoteGroupPort(remoteGroupPortId);
+        if (remoteGroupPort == null) {
+            throw new ResourceNotFoundException("The component that generated this event is no longer part of the data flow.");
+        } else {
+            // authorizable for remote group ports should be the remote process group
+            authorizable = new DataAuthorizable(remoteGroupPort.getRemoteProcessGroup());
         }
 
         return authorizable;

@@ -34,6 +34,7 @@ import org.apache.nifi.components.ValidationResult;
 import org.apache.nifi.connectable.ConnectableType;
 import org.apache.nifi.connectable.Connection;
 import org.apache.nifi.controller.ProcessScheduler;
+import org.apache.nifi.controller.ScheduledState;
 import org.apache.nifi.flowfile.FlowFile;
 import org.apache.nifi.flowfile.attributes.CoreAttributes;
 import org.apache.nifi.groups.ProcessGroup;
@@ -48,6 +49,7 @@ import org.apache.nifi.remote.exception.ProtocolException;
 import org.apache.nifi.remote.exception.UnknownPortException;
 import org.apache.nifi.remote.protocol.DataPacket;
 import org.apache.nifi.remote.protocol.http.HttpProxy;
+import org.apache.nifi.remote.util.SiteToSiteRestApiClient;
 import org.apache.nifi.remote.util.StandardDataPacket;
 import org.apache.nifi.reporting.Severity;
 import org.apache.nifi.scheduling.SchedulingStrategy;
@@ -142,7 +144,7 @@ public class StandardRemoteGroupPort extends RemoteGroupPort {
         final long penalizationMillis = FormatUtils.getTimeDuration(remoteGroup.getYieldDuration(), TimeUnit.MILLISECONDS);
 
         final SiteToSiteClient client = new SiteToSiteClient.Builder()
-                .url(remoteGroup.getTargetUri().toString())
+                .urls(SiteToSiteRestApiClient.parseClusterUrls(remoteGroup.getTargetUris()))
                 .portIdentifier(getIdentifier())
                 .sslContext(sslContext)
                 .useCompression(isUseCompression())
@@ -168,7 +170,7 @@ public class StandardRemoteGroupPort extends RemoteGroupPort {
             return;
         }
 
-        final String url = getRemoteProcessGroup().getTargetUri().toString();
+        final String url = getRemoteProcessGroup().getTargetUri();
 
         // If we are sending data, we need to ensure that we have at least 1 FlowFile to send. Otherwise,
         // we don't want to create a transaction at all.
@@ -367,7 +369,7 @@ public class StandardRemoteGroupPort extends RemoteGroupPort {
             final String uploadDataRate = stopWatch.calculateDataRate(bytesReceived);
             final long uploadMillis = stopWatch.getDuration(TimeUnit.MILLISECONDS);
             final String dataSize = FormatUtils.formatDataSize(bytesReceived);
-            logger.info("{} Successfully receveied {} ({}) from {} in {} milliseconds at a rate of {}", new Object[]{
+            logger.info("{} Successfully received {} ({}) from {} in {} milliseconds at a rate of {}", new Object[]{
                 this, flowFileDescription, dataSize, transaction.getCommunicant().getUrl(), uploadMillis, uploadDataRate});
         }
 
@@ -381,31 +383,33 @@ public class StandardRemoteGroupPort extends RemoteGroupPort {
 
     @Override
     public boolean isValid() {
-        return getValidationErrors().isEmpty();
+        return targetExists.get()
+                && (getConnectableType() == ConnectableType.REMOTE_OUTPUT_PORT ? !getConnections(Relationship.ANONYMOUS).isEmpty() : true);
     }
 
     @Override
     public Collection<ValidationResult> getValidationErrors() {
         final Collection<ValidationResult> validationErrors = new ArrayList<>();
-        ValidationResult error = null;
-        if (!targetExists.get()) {
-            error = new ValidationResult.Builder()
-                    .explanation(String.format("Remote instance indicates that port '%s' no longer exists.", getName()))
-                    .subject(String.format("Remote port '%s'", getName()))
-                    .valid(false)
-                    .build();
-        } else if (getConnectableType() == ConnectableType.REMOTE_OUTPUT_PORT && getConnections(Relationship.ANONYMOUS).isEmpty()) {
-            error = new ValidationResult.Builder()
-                    .explanation(String.format("Port '%s' has no outbound connections", getName()))
-                    .subject(String.format("Remote port '%s'", getName()))
-                    .valid(false)
-                    .build();
-        }
+        if (getScheduledState() == ScheduledState.STOPPED) {
+            ValidationResult error = null;
+            if (!targetExists.get()) {
+                error = new ValidationResult.Builder()
+                        .explanation(String.format("Remote instance indicates that port '%s' no longer exists.", getName()))
+                        .subject(String.format("Remote port '%s'", getName()))
+                        .valid(false)
+                        .build();
+            } else if (getConnectableType() == ConnectableType.REMOTE_OUTPUT_PORT && getConnections(Relationship.ANONYMOUS).isEmpty()) {
+                error = new ValidationResult.Builder()
+                        .explanation(String.format("Port '%s' has no outbound connections", getName()))
+                        .subject(String.format("Remote port '%s'", getName()))
+                        .valid(false)
+                        .build();
+            }
 
-        if (error != null) {
-            validationErrors.add(error);
+            if (error != null) {
+                validationErrors.add(error);
+            }
         }
-
         return validationErrors;
     }
 
@@ -430,7 +434,7 @@ public class StandardRemoteGroupPort extends RemoteGroupPort {
 
     @Override
     public String toString() {
-        return "RemoteGroupPort[name=" + getName() + ",target=" + remoteGroup.getTargetUri().toString() + "]";
+        return "RemoteGroupPort[name=" + getName() + ",targets=" + remoteGroup.getTargetUris() + "]";
     }
 
     @Override
