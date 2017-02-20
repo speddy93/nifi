@@ -22,9 +22,7 @@ import java.util.Map;
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
 import org.junit.Test;
-/**
- * Created by onb813 on 11/15/16.
- */
+
 public class TestUpdateCounter {
 
 
@@ -39,5 +37,19 @@ public class TestUpdateCounter {
         Long counter = firstrunner.getCounterValue("firewall");
         firstrunner.assertAllFlowFilesTransferred(UpdateCounter.SUCCESS, 1);
     }
+
+    @Test
+    public void testFileNameExpressionLanguage() throws Exception {
+
+        final TestRunner firstrunner = TestRunners.newTestRunner(new UpdateCounter());
+        firstrunner.setProperty(UpdateCounter.CounterName,"$filename");
+        firstrunner.setProperty(UpdateCounter.Delta,"1");
+        Map<String,String> attributes = new HashMap<String,String>();
+        firstrunner.enqueue("",attributes);
+        firstrunner.run();
+        Long counter = firstrunner.getCounterValue("firewall");
+        firstrunner.assertAllFlowFilesTransferred(UpdateCounter.SUCCESS, 1);
+    }
+
 
 }

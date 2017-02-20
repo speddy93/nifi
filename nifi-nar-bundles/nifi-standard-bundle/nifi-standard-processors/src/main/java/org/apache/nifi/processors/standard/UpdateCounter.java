@@ -37,13 +37,9 @@ import java.util.List;
 import java.util.Set;
 import java.util.HashSet;
 
-/**
- * Created by onb813 on 11/10/16.
- */
-
 @InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
-@Tags({"counter","tracking","provenance"})
-@CapabilityDescription("Can update counter value and can get counter value to use")
+@Tags({"counter","debug"})
+@CapabilityDescription("This processor allows users to set specific counters and key points in their flow. It is useful for debugging and basic counting functions.")
 @ReadsAttribute(attribute = "counterName", description = "The name of the counter to update/get.")
 public class UpdateCounter extends AbstractProcessor {
 
@@ -51,21 +47,23 @@ public class UpdateCounter extends AbstractProcessor {
 
     public static final PropertyDescriptor CounterName = new PropertyDescriptor.Builder()
             .name("CounterName")
+            .displayName("Counter Name")
             .description("The name of the counter you want to set the value off - supports expression language like ${counterName}")
             .required(true)
             .addValidator(StandardValidators.NON_EMPTY_VALIDATOR)
+            .addValidator(StandardValidators.ATTRIBUTE_EXPRESSION_LANGUAGE_VALIDATOR)
             .expressionLanguageSupported(true)
             .build();
 
-    //TODO Can this support expression language too?
     public static final PropertyDescriptor Delta = new PropertyDescriptor.Builder()
-            .name("DELTA")
-            .description("If positive increments counter by delta - if negative decrements counter by delta")
+            .name("delta")
+            .displayName("Delta")
+            .description("Adjusts the counter by the specified delta for each flow file received. May be positive or negative.")
             .required(true)
             .addValidator(StandardValidators.INTEGER_VALIDATOR)
-            .expressionLanguageSupported(false)
+            .addValidator(StandardValidators.ATTRIBUTE_EXPRESSION_LANGUAGE_VALIDATOR)
+            .expressionLanguageSupported(true)
             .build();
-
 
     public static final Relationship SUCCESS = new Relationship.Builder()
             .name("success")
@@ -82,23 +80,19 @@ public class UpdateCounter extends AbstractProcessor {
     private Set<Relationship> relationships;
 
 
-
     @Override
     protected void init(final ProcessorInitializationContext context) {
-        // Create the Property descriptors.
         final List<PropertyDescriptor> descriptors = new ArrayList<>();
         descriptors.add(CounterName);
         descriptors.add(Delta);
         this.descriptors = Collections.unmodifiableList(descriptors);
 
-        // Create the Relationships.
         final Set<Relationship> relationships = new HashSet<>();
         relationships.add(SUCCESS);
         relationships.add(FAILURE);
         this.relationships = Collections.unmodifiableSet(relationships);
     }
-
-
+    
     @Override
     public Set<Relationship> getRelationships() {
         return relationships;
@@ -112,15 +106,11 @@ public class UpdateCounter extends AbstractProcessor {
     @Override
     public void onTrigger(ProcessContext context, ProcessSession session) throws ProcessException {
 
-        //TODO this would be for the get part of the processor
-        //StandardCounterRepository counterRepository = new StandardCounterRepository();
-        //counterRepository.getCounters();
 
         final ComponentLog logger = getLogger();
         FlowFile flowFile = session.get();
         try {
-            //I Can also do checks for positive and negative -- prob not needed
-            session.adjustCounter(context.getProperty(CounterName).evaluateAttributeExpressions(flowFile).getValue(), Long.parseLong(context.getProperty(Delta).getValue()), false);
+            session.adjustCounter(context.getProperty(CounterName).evaluateAttributeExpressions(flowFile).getValue(), Long.parseLong(context.getProperty(Delta).evaluateAttributeExpressions(flowFile).getValue()), false);
             session.transfer(flowFile, SUCCESS);
         } catch (Exception e) {
             logger.error("The following exception occurred" + e.getMessage());
