@@ -16,7 +16,6 @@
  */
 package org.apache.nifi.processors.standard;
 
-import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -37,7 +36,6 @@ public class TestUpdateCounter {
         Map<String,String> attributes = new HashMap<String,String>();
         firstrunner.enqueue("",attributes);
         firstrunner.run();
-        Long counter = firstrunner.getCounterValue("firewall");
         firstrunner.assertAllFlowFilesTransferred(UpdateCounter.SUCCESS, 1);
     }
 
@@ -58,6 +56,5 @@ public class TestUpdateCounter {
         assertEquals(java.util.Optional.ofNullable(counter), java.util.Optional.ofNullable(40L));
         firstrunner.assertAllFlowFilesTransferred(UpdateCounter.SUCCESS, 1);
     }
-
 
 }
