@@ -16,12 +16,15 @@
  */
 package org.apache.nifi.processors.standard;
 
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.nifi.util.TestRunner;
 import org.apache.nifi.util.TestRunners;
 import org.junit.Test;
+
+import static org.junit.Assert.assertEquals;
 
 public class TestUpdateCounter {
 
@@ -39,15 +42,20 @@ public class TestUpdateCounter {
     }
 
     @Test
-    public void testFileNameExpressionLanguage() throws Exception {
+    public void testExpressionLanguage() throws Exception {
 
         final TestRunner firstrunner = TestRunners.newTestRunner(new UpdateCounter());
-        firstrunner.setProperty(UpdateCounter.CounterName,"$filename");
-        firstrunner.setProperty(UpdateCounter.Delta,"1");
-        Map<String,String> attributes = new HashMap<String,String>();
-        firstrunner.enqueue("",attributes);
+        firstrunner.setProperty(UpdateCounter.CounterName,"${filename}");
+        firstrunner.setProperty(UpdateCounter.Delta,"${num}");
+
+        final Map<String, String> attributes = new HashMap<>();
+        attributes.put("filename", "test");
+        attributes.put("num", "40");
+
+        firstrunner.enqueue(new byte[0],attributes);
         firstrunner.run();
-        Long counter = firstrunner.getCounterValue("firewall");
+        Long counter = firstrunner.getCounterValue("test");
+        assertEquals(java.util.Optional.ofNullable(counter), java.util.Optional.ofNullable(40L));
         firstrunner.assertAllFlowFilesTransferred(UpdateCounter.SUCCESS, 1);
     }
 
