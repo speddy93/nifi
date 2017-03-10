@@ -38,15 +38,15 @@ import java.util.Set;
 import java.util.HashSet;
 
 @InputRequirement(InputRequirement.Requirement.INPUT_REQUIRED)
-@Tags({"counter","debug"})
+@Tags({"counter","debug", "instrumentation"})
 @CapabilityDescription("This processor allows users to set specific counters and key points in their flow. It is useful for debugging and basic counting functions.")
 @ReadsAttribute(attribute = "counterName", description = "The name of the counter to update/get.")
 public class UpdateCounter extends AbstractProcessor {
 
 
 
-    public static final PropertyDescriptor CounterName = new PropertyDescriptor.Builder()
-            .name("CounterName")
+    static final PropertyDescriptor COUNTER_NAME = new PropertyDescriptor.Builder()
+            .name("counter-name")
             .displayName("Counter Name")
             .description("The name of the counter you want to set the value off - supports expression language like ${counterName}")
             .required(true)
@@ -55,41 +55,35 @@ public class UpdateCounter extends AbstractProcessor {
             .expressionLanguageSupported(true)
             .build();
 
-    public static final PropertyDescriptor Delta = new PropertyDescriptor.Builder()
+    static final PropertyDescriptor DELTA = new PropertyDescriptor.Builder()
             .name("delta")
             .displayName("Delta")
-            .description("Adjusts the counter by the specified delta for each flow file received. May be positive or negative.")
+            .description("Adjusts the counter by the specified delta for each flow file received. May be a positive or negative integer.")
             .required(true)
+            .defaultValue("1")
             .addValidator(StandardValidators.INTEGER_VALIDATOR)
             .addValidator(StandardValidators.ATTRIBUTE_EXPRESSION_LANGUAGE_VALIDATOR)
             .expressionLanguageSupported(true)
             .build();
 
-    public static final Relationship SUCCESS = new Relationship.Builder()
+    static final Relationship SUCCESS = new Relationship.Builder()
             .name("success")
             .description("Counter was updated/retrieved")
-            .build();
-
-    public static final Relationship FAILURE = new Relationship.Builder()
-            .name("failure")
-            .description("Counter was not updated/retrieved")
             .build();
 
     private List<PropertyDescriptor> descriptors;
 
     private Set<Relationship> relationships;
 
-
     @Override
     protected void init(final ProcessorInitializationContext context) {
         final List<PropertyDescriptor> descriptors = new ArrayList<>();
-        descriptors.add(CounterName);
-        descriptors.add(Delta);
+        descriptors.add(COUNTER_NAME);
+        descriptors.add(DELTA);
         this.descriptors = Collections.unmodifiableList(descriptors);
 
         final Set<Relationship> relationships = new HashSet<>();
         relationships.add(SUCCESS);
-        relationships.add(FAILURE);
         this.relationships = Collections.unmodifiableSet(relationships);
     }
     
@@ -105,17 +99,11 @@ public class UpdateCounter extends AbstractProcessor {
 
     @Override
     public void onTrigger(ProcessContext context, ProcessSession session) throws ProcessException {
-
-
-        final ComponentLog logger = getLogger();
         FlowFile flowFile = session.get();
-        try {
-            session.adjustCounter(context.getProperty(CounterName).evaluateAttributeExpressions(flowFile).getValue(), Long.parseLong(context.getProperty(Delta).evaluateAttributeExpressions(flowFile).getValue()), false);
-            session.transfer(flowFile, SUCCESS);
-        } catch (Exception e) {
-            logger.error("The following exception occurred" + e.getMessage());
-            session.transfer(flowFile, FAILURE);
-        }
-
+        session.adjustCounter(context.getProperty(COUNTER_NAME).evaluateAttributeExpressions(flowFile).getValue(),
+                Long.parseLong(context.getProperty(DELTA).evaluateAttributeExpressions(flowFile).getValue()),
+                false
+        );
+        session.transfer(flowFile, SUCCESS);
     }
 }
