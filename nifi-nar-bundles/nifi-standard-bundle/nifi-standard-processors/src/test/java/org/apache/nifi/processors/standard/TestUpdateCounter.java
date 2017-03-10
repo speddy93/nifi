@@ -31,8 +31,8 @@ public class TestUpdateCounter {
     @Test
     public void testwithFileName() throws Exception {
         final TestRunner firstrunner = TestRunners.newTestRunner(new UpdateCounter());
-        firstrunner.setProperty(UpdateCounter.CounterName,"firewall");
-        firstrunner.setProperty(UpdateCounter.Delta,"1");
+        firstrunner.setProperty(UpdateCounter.COUNTER_NAME,"firewall");
+        firstrunner.setProperty(UpdateCounter.DELTA,"1");
         Map<String,String> attributes = new HashMap<String,String>();
         firstrunner.enqueue("",attributes);
         firstrunner.run();
@@ -43,8 +43,8 @@ public class TestUpdateCounter {
     public void testExpressionLanguage() throws Exception {
 
         final TestRunner firstrunner = TestRunners.newTestRunner(new UpdateCounter());
-        firstrunner.setProperty(UpdateCounter.CounterName,"${filename}");
-        firstrunner.setProperty(UpdateCounter.Delta,"${num}");
+        firstrunner.setProperty(UpdateCounter.COUNTER_NAME,"${filename}");
+        firstrunner.setProperty(UpdateCounter.DELTA,"${num}");
 
         final Map<String, String> attributes = new HashMap<>();
         attributes.put("filename", "test");
